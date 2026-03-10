@@ -1,0 +1,14 @@
+{
+  "id": "nodebb-plugin-chat-search",
+  "url": "https://github.com/palmoni5/nodebb-plugin-chat-search",
+  "name": "Chat Search",
+  "description": "Allows searching in chat windows",
+  "library": "./library.js",
+  "hooks": [
+    { "hook": "static:app.load", "method": "init" },
+    { "hook": "filter:scripts.client", "method": "addClientScript" }
+  ],
+  "scripts": [
+    "static/lib/main.js"
+  ]
+}
