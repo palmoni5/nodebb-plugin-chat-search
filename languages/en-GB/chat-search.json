@@ -1,0 +1,5 @@
+{
+  "error.no-privileges": "You do not have permission.",
+  "room.self-chat": "Self chat",
+  "room.and-more-users": "%1 and %2 more users"
+}

@@ -23,6 +23,9 @@ Clicking a search result scrolls directly to the message and highlights it with 
 **Rich Previews**  
 Results include room names, sender avatars, and timestamps, matching the native NodeBB interface.
 
+**English + Hebrew Friendly**
+Server-generated labels now adapt correctly for English and Hebrew users instead of relying on hard-coded Hebrew text.
+
 ---
 
 ## 🛠 Technical Details

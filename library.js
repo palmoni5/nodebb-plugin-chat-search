@@ -3,6 +3,7 @@
 const messaging = require.main.require('./src/messaging');
 const user = require.main.require('./src/user');
 const db = require.main.require('./src/database');
+const translator = require.main.require('./src/translator');
 
 const plugin = {};
 
@@ -43,10 +44,14 @@ async function getMessagesForSearch(params) {
 async function searchGlobal(socket, data) {
     if (!socket.uid) throw new Error('Not logged in');
     const isAdmin = await user.isAdministrator(socket.uid);
+    const settings = await user.getSettings(socket.uid);
+    const userLang = settings.userLang || 'en-GB';
     
     let targetUid = socket.uid;
     if (data.targetUid && parseInt(data.targetUid, 10) !== parseInt(socket.uid, 10)) {
-        if (!isAdmin) throw new Error('אין הרשאה.');
+        if (!isAdmin) {
+            throw new Error(await translate(userLang, 'error.no-privileges'));
+        }
         targetUid = data.targetUid;
     }
 
@@ -106,12 +111,14 @@ async function searchGlobal(socket, data) {
                 const otherUsers = usersData.filter(u => parseInt(u.uid, 10) !== parseInt(targetUid, 10));
 
                 let displayName = '';
-                if (otherUsers.length === 0) displayName = 'צ\'אט עצמי';
-                else if (otherUsers.length <= 2) displayName = otherUsers.map(u => u.username).join(', ');
-                else {
+                if (otherUsers.length === 0) {
+                    displayName = await translate(userLang, 'room.self-chat');
+                } else if (otherUsers.length <= 2) {
+                    displayName = otherUsers.map(u => u.username).join(', ');
+                } else {
                     const firstTwo = otherUsers.slice(0, 2).map(u => u.username).join(', ');
                     const remaining = otherUsers.length - 2;
-                    displayName = `${firstTwo} ועוד ${remaining} משתמשים`;
+                    displayName = await translate(userLang, 'room.and-more-users', firstTwo, remaining);
                 }
 
                 const roomData = await messaging.getRoomData(roomId);
@@ -135,6 +142,13 @@ async function searchGlobal(socket, data) {
         }
     }
     return allResults;
+}
+
+async function translate(language, key, ...args) {
+    return await translator.translate(
+        translator.compile(`chat-search:${key}`, ...args),
+        language
+    );
 }
 
 module.exports = plugin;

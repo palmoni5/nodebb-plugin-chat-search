@@ -4,6 +4,7 @@
   "name": "Chat Search",
   "description": "Allows searching in chat windows",
   "library": "./library.js",
+  "languages": "./languages",
   "hooks": [
     { "hook": "static:app.load", "method": "init" },
     { "hook": "filter:scripts.client", "method": "addClientScript" }
