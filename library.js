@@ -21,12 +21,21 @@ plugin.addClientScript = async (scripts) => {
 async function getMessagesForSearch(params) {
     const { callerUid, targetUid, roomId, start, stop, allowFullHistory } = params;
     if (allowFullHistory) {
-        const mids = await db.getSortedSetRevRange(`chat:room:${roomId}:mids`, start, stop);
+        const [mids, messageCount] = await Promise.all([
+            db.getSortedSetRevRange(`chat:room:${roomId}:mids`, start, stop),
+            db.getObjectField(`chat:room:${roomId}`, 'messageCount'),
+        ]);
         if (!mids || !mids.length) return [];
+        const count = parseInt(messageCount, 10) || 0;
+        const indices = {};
+        mids.forEach((mid, i) => {
+            indices[mid.toString()] = count - start - i - 1;
+        });
         mids.reverse();
         const messages = await messaging.getMessagesData(mids, targetUid, roomId, false);
         messages.forEach((msg) => {
             if (!msg.mid && msg.messageId) msg.mid = msg.messageId;
+            msg.index = indices[msg.messageId.toString()];
         });
         return messages;
     }

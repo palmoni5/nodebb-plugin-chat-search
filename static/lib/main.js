@@ -34,7 +34,6 @@ $(document).ready(function () {
 
     $(window).on('action:chat.loaded', function (ev, data) {
         highlightActiveChat();
-        handleScrollToMessage();
     });
 
     if (ajaxify.data.template && (ajaxify.data.template.name === 'chats' || ajaxify.data.template === 'chats')) {
@@ -227,8 +226,9 @@ $(document).ready(function () {
                 
                 let baseUrl = window.location.pathname.replace(/\/chats\/.*$/, '/chats');
                 if (baseUrl.endsWith('/')) baseUrl = baseUrl.slice(0, -1);
-                
-                const chatLink = baseUrl + '/' + msg.roomId + '?mid=' + msg.mid;
+
+                const indexPart = (typeof msg.index === 'number') ? '/' + (msg.index + 1) : '';
+                const chatLink = baseUrl + '/' + msg.roomId + indexPart;
                 const senderName = (msg.user && msg.user.username) ? msg.user.username : txt.unknownUser;
                 
                 const mainAvatarHtml = renderMainAvatars(msg.participants);
@@ -293,26 +293,4 @@ $(document).ready(function () {
         activeItem.addClass('active');
     }
 
-    function handleScrollToMessage() {
-        const params = new URLSearchParams(window.location.search);
-        const mid = params.get('mid');
-        if (!mid) return;
-        scrollToId(mid);
-        let attempts = 0;
-        const scrollInt = setInterval(() => {
-            attempts++;
-            if (scrollToId(mid) || attempts > 15) clearInterval(scrollInt);
-        }, 300);
-    }
-
-    function scrollToId(mid) {
-        const el = $('[data-mid="' + mid + '"]');
-        if (el.length > 0) {
-            el[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
-            el.css('background', '#fffeca').css('transition', 'background 1s');
-            setTimeout(() => el.css('background', ''), 2000);
-            return true;
-        }
-        return false;
-    }
 });
