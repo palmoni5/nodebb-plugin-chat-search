@@ -224,11 +224,7 @@ $(document).ready(function () {
             messages.forEach(msg => {
                 const isoTime = new Date(msg.timestamp).toISOString();
                 
-                let baseUrl = window.location.pathname.replace(/\/chats\/.*$/, '/chats');
-                if (baseUrl.endsWith('/')) baseUrl = baseUrl.slice(0, -1);
-
-                const indexPart = (typeof msg.index === 'number') ? '/' + (msg.index + 1) : '';
-                const chatLink = baseUrl + '/' + msg.roomId + indexPart;
+                const chatLink = (config.relative_path || '') + '/message/' + msg.mid;
                 const senderName = (msg.user && msg.user.username) ? msg.user.username : txt.unknownUser;
                 
                 const mainAvatarHtml = renderMainAvatars(msg.participants);
@@ -239,7 +235,7 @@ $(document).ready(function () {
                 html += `
                     <div component="chat/recent/room" class="rounded-1 search-result" data-roomid="${msg.roomId}">
                         <div class="d-flex gap-1 justify-content-between">
-                            <a href="#" onclick="ajaxify.go('${chatLink}'); return false;" class="chat-room-btn position-relative d-flex flex-grow-1 gap-2 justify-content-start align-items-start btn btn-ghost btn-sm ff-sans text-start" style="padding: 0.5rem;">
+                            <a href="${chatLink}" onclick="ajaxify.go('${chatLink}'); return false;" class="chat-room-btn position-relative d-flex flex-grow-1 gap-2 justify-content-start align-items-start btn btn-ghost btn-sm ff-sans text-start" style="padding: 0.5rem;">
                                 
                                 ${mainAvatarHtml}
                                 
