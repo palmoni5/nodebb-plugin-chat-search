@@ -12,7 +12,7 @@ Standard chat search in NodeBB works well when you already know which room the m
 Searches across all room IDs associated with your user account.
 
 **Performance Focused**  
-Messages are fetched in batches of 50 to keep the server responsive even during deep searches.
+Matching is done against raw message content first, so the expensive render pipeline runs only for actual hits. Rooms are scanned in parallel with bounded concurrency, keeping the server responsive even during deep searches.
 
 **Sticky UI**  
 Your search query and results remain visible when navigating between chat rooms.

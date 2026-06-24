@@ -7,6 +7,11 @@ const translator = require.main.require('./src/translator');
 
 const plugin = {};
 
+// Tunables
+const MAX_RESULTS = 200; // hard cap on total matches returned to the client
+const ROOM_CONCURRENCY = 10; // rooms scanned in parallel
+const RAW_READ_CHUNK = 2500; // mids per raw-content DB read, bounds peak memory/query size
+
 plugin.init = async (params) => {
     const socketPlugins = require.main.require('./src/socket.io/plugins');
     socketPlugins.chatSearch = {};
@@ -18,27 +23,113 @@ plugin.addClientScript = async (scripts) => {
     return scripts;
 };
 
-async function getMessagesForSearch(params) {
-    const { callerUid, targetUid, roomId, start, stop, allowFullHistory } = params;
+// Returns the candidate mids visible for this search (newest first),
+// mirroring the visibility rules of Messaging.getMessages.
+async function getCandidateMids({ callerUid, targetUid, roomId, allowFullHistory }) {
+    const key = `chat:room:${roomId}:mids`;
     if (allowFullHistory) {
-        const mids = await db.getSortedSetRevRange(`chat:room:${roomId}:mids`, start, stop);
-        if (!mids || !mids.length) return [];
-        mids.reverse();
-        const messages = await messaging.getMessagesData(mids, targetUid, roomId, false);
-        messages.forEach((msg) => {
-            if (!msg.mid && msg.messageId) msg.mid = msg.messageId;
-        });
-        return messages;
+        // Admin viewing specific rooms: full history, no per-user filtering.
+        return await db.getSortedSetRevRange(key, 0, -1);
     }
-    const messages = await messaging.getMessages({
-        callerUid: callerUid,
-        uid: targetUid,
-        roomId: roomId,
-        isNew: false,
-        start: start,
-        stop: stop,
+    // The standard path only ever exposes a user's own conversations.
+    if (parseInt(callerUid, 10) !== parseInt(targetUid, 10)) {
+        return [];
+    }
+    const isPublic = await db.getObjectField(`chat:room:${roomId}`, 'public');
+    if (parseInt(isPublic, 10) === 1) {
+        return await db.getSortedSetRevRange(key, 0, -1);
+    }
+    // Private rooms: only messages sent after the user joined.
+    const userjoinTimestamp = await db.sortedSetScore(`chat:room:${roomId}:uids`, targetUid);
+    return await db.getSortedSetRevRangeByScore(key, 0, -1, '+inf', userjoinTimestamp);
+}
+
+// Cheaply finds matching mids by scanning only the raw `content` field, avoiding
+// the heavy parse/render pipeline for the (vast majority of) non-matching messages.
+async function findMatchingMids({ mids, query, targetUid }) {
+    if (!mids.length) {
+        return [];
+    }
+    const matched = [];
+    for (let i = 0; i < mids.length; i += RAW_READ_CHUNK) {
+        const chunk = mids.slice(i, i + RAW_READ_CHUNK);
+        const raw = await db.getObjectsFields(
+            chunk.map(mid => `message:${mid}`),
+            ['content', 'deleted', 'fromuid']
+        );
+        for (let j = 0; j < chunk.length; j += 1) {
+            const msg = raw[j];
+            if (!msg || !msg.content) {
+                continue;
+            }
+            // Deleted messages are shown to their author only, matching
+            // getMessagesData's placeholder behaviour for everyone else.
+            const isOwner = parseInt(msg.fromuid, 10) === parseInt(targetUid, 10);
+            if (parseInt(msg.deleted, 10) === 1 && !isOwner) {
+                continue;
+            }
+            if (String(msg.content).toLowerCase().includes(query)) {
+                matched.push(chunk[j]);
+            }
+        }
+    }
+    return matched;
+}
+
+// Attaches the room/participant/sender metadata expected by the client UI.
+async function decorateRoomMatches({ matches, roomId, targetUid, userLang }) {
+    const uids = await messaging.getUidsInRoom(roomId, 0, -1);
+    const usersData = await user.getUsersFields(uids, ['uid', 'username', 'picture', 'icon:text', 'icon:bgColor']);
+    const otherUsers = usersData.filter(u => parseInt(u.uid, 10) !== parseInt(targetUid, 10));
+
+    let displayName = '';
+    if (otherUsers.length === 0) {
+        displayName = await translate(userLang, 'room.self-chat');
+    } else if (otherUsers.length <= 2) {
+        displayName = otherUsers.map(u => u.username).join(', ');
+    } else {
+        const firstTwo = otherUsers.slice(0, 2).map(u => u.username).join(', ');
+        const remaining = otherUsers.length - 2;
+        displayName = await translate(userLang, 'room.and-more-users', firstTwo, remaining);
+    }
+
+    const roomData = await messaging.getRoomData(roomId);
+    const roomName = (roomData && roomData.roomName) || displayName;
+
+    matches.forEach((m) => {
+        if (!m.mid && m.messageId) m.mid = m.messageId;
+        if (!m.roomId) m.roomId = roomId;
+        if (!m.user || !m.user.username) {
+            const sender = usersData.find(u => parseInt(u.uid, 10) === parseInt(m.fromuid, 10));
+            m.user = sender || { username: 'Unknown', 'icon:bgColor': '#aaa' };
+        }
+        m.roomName = roomName;
+        m.targetUid = targetUid;
+        m.participants = otherUsers;
     });
-    return messages || [];
+
+    return matches;
+}
+
+// Scans a single room: find matching mids on raw content, then render only the matches.
+async function searchRoom({ callerUid, targetUid, roomId, query, allowFullHistory, userLang }) {
+    const mids = await getCandidateMids({ callerUid, targetUid, roomId, allowFullHistory });
+    if (!mids.length) {
+        return [];
+    }
+
+    const matchedMids = await findMatchingMids({ mids, query, targetUid });
+    if (!matchedMids.length) {
+        return [];
+    }
+
+    // The expensive render pipeline now runs only for actual matches.
+    const messages = await messaging.getMessagesData(matchedMids, targetUid, roomId, false);
+    if (!messages || !messages.length) {
+        return [];
+    }
+
+    return await decorateRoomMatches({ matches: messages, roomId, targetUid, userLang });
 }
 
 async function searchGlobal(socket, data) {
@@ -46,7 +137,7 @@ async function searchGlobal(socket, data) {
     const isAdmin = await user.isAdministrator(socket.uid);
     const settings = await user.getSettings(socket.uid);
     const userLang = settings.userLang || 'en-GB';
-    
+
     let targetUid = socket.uid;
     if (data.targetUid && parseInt(data.targetUid, 10) !== parseInt(socket.uid, 10)) {
         if (!isAdmin) {
@@ -55,93 +146,38 @@ async function searchGlobal(socket, data) {
         targetUid = data.targetUid;
     }
 
-    const query = data.query;
+    // Guard against an empty query, which would otherwise match every message.
+    const query = String(data.query || '').trim().toLowerCase();
+    if (!query) {
+        return [];
+    }
+
     const requestedRoomIds = Array.isArray(data.roomIds) ? data.roomIds : null;
-    const roomIds = requestedRoomIds && requestedRoomIds.length
+    let roomIds = requestedRoomIds && requestedRoomIds.length
         ? [...new Set(requestedRoomIds.map(rid => parseInt(rid, 10)).filter(rid => Number.isFinite(rid) && rid > 0))]
         : await db.getSortedSetRevRange('uid:' + targetUid + ':chat:rooms', 0, -1);
-    let allResults = [];
     const allowFullHistory = isAdmin && requestedRoomIds && requestedRoomIds.length;
 
-    for (const roomId of roomIds) {
-        if (!isAdmin) {
-            const inRoom = await messaging.isUserInRoom(targetUid, roomId);
-            if (!inRoom) continue;
-        }
-
-        try {
-            let start = 0;
-            const batchSize = 50;
-            let roomMatches = [];
-            let continueFetching = true;
-
-            while (continueFetching) {
-                const messages = await getMessagesForSearch({
-                    callerUid: socket.uid,
-                    targetUid: targetUid,
-                    roomId: roomId,
-                    start: start,
-                    stop: start + batchSize - 1,
-                    allowFullHistory: allowFullHistory,
-                });
-
-                if (!messages || !Array.isArray(messages) || messages.length === 0) {
-                    continueFetching = false;
-                    break;
-                }
-
-                const matches = messages.filter(msg => 
-                    msg.content && msg.content.toLowerCase().includes(query.toLowerCase())
-                );
-                
-                if (matches.length > 0) {
-                    roomMatches = roomMatches.concat(matches);
-                }
-
-                if (messages.length < batchSize) {
-                    continueFetching = false;
-                } else {
-                    start += batchSize;
-                }
-            }
-
-            if (roomMatches.length > 0) {
-                const uids = await messaging.getUidsInRoom(roomId, 0, -1);
-                const usersData = await user.getUsersFields(uids, ['uid', 'username', 'picture', 'icon:text', 'icon:bgColor']);
-                const otherUsers = usersData.filter(u => parseInt(u.uid, 10) !== parseInt(targetUid, 10));
-
-                let displayName = '';
-                if (otherUsers.length === 0) {
-                    displayName = await translate(userLang, 'room.self-chat');
-                } else if (otherUsers.length <= 2) {
-                    displayName = otherUsers.map(u => u.username).join(', ');
-                } else {
-                    const firstTwo = otherUsers.slice(0, 2).map(u => u.username).join(', ');
-                    const remaining = otherUsers.length - 2;
-                    displayName = await translate(userLang, 'room.and-more-users', firstTwo, remaining);
-                }
-
-                const roomData = await messaging.getRoomData(roomId);
-                let roomName = (roomData && roomData.roomName) || displayName;
-
-                roomMatches.forEach(m => {
-                    if (!m.roomId) m.roomId = roomId;
-                    if (!m.user || !m.user.username) {
-                        const sender = usersData.find(u => parseInt(u.uid, 10) === parseInt(m.fromuid, 10));
-                        m.user = sender || { username: 'Unknown', 'icon:bgColor': '#aaa' };
-                    }
-                    m.roomName = roomName;
-                    m.targetUid = targetUid;
-                    m.participants = otherUsers;
-                });
-                
-                allResults = allResults.concat(roomMatches);
-            }
-        } catch (err) { 
-            console.error(`[Chat Search] Error in room ${roomId}: ${err.message}`); 
-        }
+    // Non-admins may only search rooms they actually belong to.
+    if (!isAdmin) {
+        const inRoom = await Promise.all(roomIds.map(roomId => messaging.isUserInRoom(targetUid, roomId)));
+        roomIds = roomIds.filter((roomId, idx) => inRoom[idx]);
     }
-    return allResults;
+
+    const allResults = [];
+    // Process rooms in bounded-concurrency batches, stopping once we have enough.
+    for (let i = 0; i < roomIds.length && allResults.length < MAX_RESULTS; i += ROOM_CONCURRENCY) {
+        const batch = roomIds.slice(i, i + ROOM_CONCURRENCY);
+        const batchResults = await Promise.all(batch.map(roomId =>
+            searchRoom({ callerUid: socket.uid, targetUid, roomId, query, allowFullHistory, userLang })
+                .catch((err) => {
+                    console.error(`[Chat Search] Error in room ${roomId}: ${err.message}`);
+                    return [];
+                })));
+        batchResults.forEach(r => allResults.push(...r));
+    }
+
+    return allResults.slice(0, MAX_RESULTS);
 }
 
 async function translate(language, key, ...args) {
