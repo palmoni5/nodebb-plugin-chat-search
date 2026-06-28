@@ -111,17 +111,30 @@ $(document).ready(function () {
         }
     }
 
+    // Escapes values that are NOT already escaped server-side. Note: roomName,
+    // username, picture and message content are escaped on read by NodeBB core
+    // (Messaging.getRoomData / User.getUsersFields), so they must be injected as-is
+    // to avoid double-escaping. Only client-derived / non-escaped fields go through here.
+    function escapeHtml(str) {
+        return String(str === null || str === undefined ? '' : str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     function buildAvatarHtml(user, sizePx, extraStyle = '', extraClasses = '') {
         const sizeVal = sizePx + 'px';
-        const bgStyle = `background-color: ${user['icon:bgColor'] || '#5c5c5c'};`;
+        const bgStyle = `background-color: ${escapeHtml(user['icon:bgColor'] || '#5c5c5c')};`;
         const commonStyle = `style="--avatar-size: ${sizeVal}; width: ${sizeVal}; height: ${sizeVal}; line-height: ${sizeVal}; ${bgStyle} ${extraStyle}"`;
         const classes = `avatar avatar-rounded ${extraClasses}`;
 
         if (user.picture) {
             return `<span title="${user.username}" class="${classes}" component="avatar/picture" ${commonStyle}><img src="${user.picture}" alt="${user.username}" class="avatar avatar-rounded"></span>`;
         }
-        
-        const text = user['icon:text'] || (user.username ? user.username[0].toUpperCase() : '?');
+
+        const text = escapeHtml(user['icon:text'] || (user.username ? user.username[0].toUpperCase() : '?'));
         return `<span title="${user.username}" class="${classes}" component="avatar/icon" ${commonStyle}>${text}</span>`;
     }
 
@@ -222,9 +235,18 @@ $(document).ready(function () {
 
             let html = '<div class="d-flex flex-column">';
             messages.forEach(msg => {
-                const isoTime = new Date(msg.timestamp).toISOString();
-                
-                const chatLink = (config.relative_path || '') + '/message/' + msg.mid;
+                // Coerce server-supplied ids/timestamps to safe primitives before they
+                // reach href/onclick/attribute sinks; guard against an invalid timestamp
+                // which would otherwise throw and abort the whole render.
+                const ts = parseInt(msg.timestamp, 10);
+                let isoTime = '';
+                if (ts) {
+                    try { isoTime = new Date(ts).toISOString(); } catch (e) { isoTime = ''; }
+                }
+
+                const mid = parseInt(msg.mid, 10);
+                const roomId = parseInt(msg.roomId, 10);
+                const chatLink = (config.relative_path || '') + '/message/' + mid;
                 const senderName = (msg.user && msg.user.username) ? msg.user.username : txt.unknownUser;
                 
                 const mainAvatarHtml = renderMainAvatars(msg.participants);
@@ -233,7 +255,7 @@ $(document).ready(function () {
                 const cleanedContent = cleanContent(msg.content);
 
                 html += `
-                    <div component="chat/recent/room" class="rounded-1 search-result" data-roomid="${msg.roomId}">
+                    <div component="chat/recent/room" class="rounded-1 search-result" data-roomid="${roomId}">
                         <div class="d-flex gap-1 justify-content-between">
                             <a href="${chatLink}" onclick="ajaxify.go('${chatLink}'); return false;" class="chat-room-btn position-relative d-flex flex-grow-1 gap-2 justify-content-start align-items-start btn btn-ghost btn-sm ff-sans text-start" style="padding: 0.5rem;">
                                 
