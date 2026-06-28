@@ -1,6 +1,6 @@
 {
   "name": "nodebb-plugin-chat-search",
-  "version": "1.8.1",
+  "version": "1.8.2",
   "description": "A plugin to search text within NodeBB chats",
   "main": "library.js",
   "repository": {
@@ -12,7 +12,7 @@
   },
   "homepage": "https://github.com/palmoni5/nodebb-plugin-chat-search#readme",
   "nbbpm": {
-    "compatibility": "^3.0.0"
+    "compatibility": "^3.0.0 || ^4.0.0"
   },
   "dependencies": {}
 }

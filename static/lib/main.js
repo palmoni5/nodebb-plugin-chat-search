@@ -19,6 +19,9 @@ $(document).ready(function () {
     };
 
     let observer = null;
+    let debounceTimer = null;
+    let searchSeq = 0;
+    const SEARCH_DEBOUNCE_MS = 350;
 
     $(window).on('action:ajaxify.end', function (ev, data) {
         if (observer) observer.disconnect();
@@ -86,15 +89,23 @@ $(document).ready(function () {
     }
 
     function attachEvents() {
-        $('#btn-chat-search').off('click').on('click', executeSearch);
+        $('#btn-chat-search').off('click').on('click', function () {
+            clearTimeout(debounceTimer);
+            executeSearch();
+        });
         const input = $('#global-chat-search');
         input.off('keypress').on('keypress', function (e) {
-            if (e.which === 13) executeSearch();
+            if (e.which === 13) {
+                clearTimeout(debounceTimer);
+                executeSearch();
+            }
         });
-        input.on('input', function() {
+        input.off('input').on('input', function() {
             window.chatSearchState.query = $(this).val();
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(executeSearch, SEARCH_DEBOUNCE_MS);
         });
-        $('#global-search-results').on('scroll', function() {
+        $('#global-search-results').off('scroll').on('scroll', function() {
             window.chatSearchState.lastScroll = $(this).scrollTop();
         });
     }
@@ -221,7 +232,10 @@ $(document).ready(function () {
             if (roomIds.length) payload.roomIds = roomIds;
         }
 
+        // Ignore responses from searches that have since been superseded by a newer one.
+        const seq = ++searchSeq;
         socket.emit('plugins.chatSearch.searchGlobal', payload, function (err, messages) {
+            if (seq !== searchSeq) return;
             if (err) {
                 resultsContainer.html(`<div class="alert alert-danger" style="margin:5px;">${txt.error}</div>`);
                 return;
