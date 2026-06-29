@@ -1,6 +1,6 @@
 {
   "name": "nodebb-plugin-chat-search",
-  "version": "1.8.2",
+  "version": "1.8.3",
   "description": "A plugin to search text within NodeBB chats",
   "main": "library.js",
   "repository": {

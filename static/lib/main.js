@@ -163,7 +163,21 @@ $(document).ready(function () {
 
     function cleanContent(content) {
         if (!content) return '';
-        return content.replace(/<\/?p[^>]*>/g, ' ').trim();
+        // The teaser is rendered inside the <a> that makes the whole row clickable.
+        // Message content is parsed HTML that may contain nested <a> (links, mentions,
+        // attachments) and block elements (<hr>, <h2>, <ol>, <code>…) — all illegal
+        // inside an anchor, so the browser's adoption-agency parsing splits the row into
+        // fragments. Reduce it to a plain-text preview (as NodeBB core's chat teasers do).
+        // DOMParser neither runs scripts nor loads resources. The result is escaped because
+        // it's injected as raw HTML downstream and entity decoding can reintroduce markup.
+        let text;
+        try {
+            const doc = new DOMParser().parseFromString(content, 'text/html');
+            text = (doc.body && doc.body.textContent) || '';
+        } catch (e) {
+            text = content.replace(/<[^>]*>/g, ' ');
+        }
+        return escapeHtml(text.replace(/\s+/g, ' ').trim());
     }
 
     function isAdminAllChatsPage() {
