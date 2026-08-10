@@ -122,10 +122,10 @@ $(document).ready(function () {
         }
     }
 
-    // Escapes values that are NOT already escaped server-side. Note: roomName,
-    // username, picture and message content are escaped on read by NodeBB core
-    // (Messaging.getRoomData / User.getUsersFields), so they must be injected as-is
-    // to avoid double-escaping. Only client-derived / non-escaped fields go through here.
+    // Escapes values before HTML injection. Since NodeBB 4.13 (Benchpress default
+    // escaping), core no longer escapes on read — roomName, username and picture
+    // arrive raw from Messaging.getRoomData / User.getUsersFields and MUST be
+    // escaped here. Message content stays as-is (parsed HTML, reduced by cleanContent).
     function escapeHtml(str) {
         return String(str === null || str === undefined ? '' : str)
             .replace(/&/g, '&amp;')
@@ -141,12 +141,13 @@ $(document).ready(function () {
         const commonStyle = `style="--avatar-size: ${sizeVal}; width: ${sizeVal}; height: ${sizeVal}; line-height: ${sizeVal}; ${bgStyle} ${extraStyle}"`;
         const classes = `avatar avatar-rounded ${extraClasses}`;
 
+        const safeUsername = escapeHtml(user.username);
         if (user.picture) {
-            return `<span title="${user.username}" class="${classes}" component="avatar/picture" ${commonStyle}><img src="${user.picture}" alt="${user.username}" class="avatar avatar-rounded"></span>`;
+            return `<span title="${safeUsername}" class="${classes}" component="avatar/picture" ${commonStyle}><img src="${escapeHtml(user.picture)}" alt="${safeUsername}" class="avatar avatar-rounded"></span>`;
         }
 
         const text = escapeHtml(user['icon:text'] || (user.username ? user.username[0].toUpperCase() : '?'));
-        return `<span title="${user.username}" class="${classes}" component="avatar/icon" ${commonStyle}>${text}</span>`;
+        return `<span title="${safeUsername}" class="${classes}" component="avatar/icon" ${commonStyle}>${text}</span>`;
     }
 
     function renderMainAvatars(participants) {
@@ -275,7 +276,7 @@ $(document).ready(function () {
                 const mid = parseInt(msg.mid, 10);
                 const roomId = parseInt(msg.roomId, 10);
                 const chatLink = (config.relative_path || '') + '/message/' + mid;
-                const senderName = (msg.user && msg.user.username) ? msg.user.username : txt.unknownUser;
+                const senderName = escapeHtml((msg.user && msg.user.username) ? msg.user.username : txt.unknownUser);
                 
                 const mainAvatarHtml = renderMainAvatars(msg.participants);
                 const senderSmallAvatar = buildAvatarHtml(msg.user, 14, 'vertical-align: text-bottom;', 'align-middle');
@@ -291,7 +292,7 @@ $(document).ready(function () {
                                 
                                 <div class="d-flex flex-grow-1 flex-column w-100" style="min-width:0;">
                                     <div component="chat/room/title" class="room-name fw-semibold text-xs text-break">
-                                        ${msg.roomName}
+                                        ${escapeHtml(msg.roomName)}
                                     </div>
                                     <div component="chat/room/teaser">
                                         
