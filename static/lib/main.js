@@ -15,13 +15,21 @@ $(document).ready(function () {
         searching: isHebrew ? 'מחפש...' : 'Searching...',
         error: isHebrew ? 'שגיאה' : 'Error',
         noResults: isHebrew ? 'לא נמצאו תוצאות.' : 'No results found.',
-        unknownUser: isHebrew ? 'לא ידוע' : 'Unknown'
+        unknownUser: isHebrew ? 'לא ידוע' : 'Unknown',
+        timeout: isHebrew ? 'החיפוש נמשך זמן רב מדי. נסה מונח ארוך או מדויק יותר.' : 'The search took too long. Try a longer or more specific term.',
+        tooShort: isHebrew ? 'הקלד לפחות 2 תווים.' : 'Type at least 2 characters.',
+        truncated: isHebrew ? 'מוצגות התוצאות העדכניות ביותר בלבד. צמצם את החיפוש כדי לראות את כולן.' : 'Showing the most recent matches only. Narrow the search to see them all.',
+        incomplete: isHebrew ? 'חלק מהחדרים לא נסרקו בגלל שגיאה. התוצאות חלקיות.' : 'Some rooms could not be searched. These results are partial.'
     };
 
     let observer = null;
     let debounceTimer = null;
     let searchSeq = 0;
     const SEARCH_DEBOUNCE_MS = 350;
+    // The server has no ack timeout of its own, and a socket that reconnects mid-flight
+    // never fires its callback at all - without this the spinner would spin forever.
+    const SEARCH_TIMEOUT_MS = 45000;
+    const MIN_QUERY_LENGTH = 2;
 
     $(window).on('action:ajaxify.end', function (ev, data) {
         if (observer) observer.disconnect();
@@ -225,6 +233,12 @@ $(document).ready(function () {
         return ids;
     }
 
+    function showMessage(container, html) {
+        container.html(html);
+        window.chatSearchState.resultsHtml = html;
+        window.chatSearchState.lastScroll = 0;
+    }
+
     function executeSearch() {
         const query = $('#global-chat-search').val();
         const resultsContainer = $('#global-search-results');
@@ -236,12 +250,23 @@ $(document).ready(function () {
             return;
         }
 
-        let targetUid = ajaxify.data.uid || app.user.uid;
-        
-        resultsContainer.show().html(`<div class="text-center" style="padding:10px;"><i class="fa fa-spinner fa-spin"></i> ${txt.searching}</div>`);
+        window.chatSearchState.query = query;
         window.chatSearchState.isOpen = true;
+        resultsContainer.show();
 
-        const payload = { query: query, targetUid: targetUid };
+        if (query.trim().length < MIN_QUERY_LENGTH) {
+            // Mirrors the server-side guard, so a one-character query never triggers a
+            // full scan of every room.
+            showMessage(resultsContainer, `<div class="text-center" style="padding:10px; color:#777;">${txt.tooShort}</div>`);
+            return;
+        }
+
+        resultsContainer.html(`<div class="text-center" style="padding:10px;"><i class="fa fa-spinner fa-spin"></i> ${txt.searching}</div>`);
+
+        // Always search on behalf of the logged-in user. ajaxify.data.uid is the uid of
+        // the profile being viewed, which is not necessarily the viewer - sending that
+        // makes the server reject the request, or return nothing at all.
+        const payload = { query: query, targetUid: app.user.uid };
         if (isAdminAllChatsPage()) {
             const roomIds = getDisplayedRoomIds();
             if (roomIds.length) payload.roomIds = roomIds;
@@ -249,20 +274,39 @@ $(document).ready(function () {
 
         // Ignore responses from searches that have since been superseded by a newer one.
         const seq = ++searchSeq;
-        socket.emit('plugins.chatSearch.searchGlobal', payload, function (err, messages) {
-            if (seq !== searchSeq) return;
+        let settled = false;
+
+        const timer = setTimeout(function () {
+            if (settled || seq !== searchSeq) return;
+            settled = true;
+            showMessage(resultsContainer, `<div class="alert alert-warning" style="margin:5px;">${txt.timeout}</div>`);
+        }, SEARCH_TIMEOUT_MS);
+
+        socket.emit('plugins.chatSearch.searchGlobal', payload, function (err, response) {
+            clearTimeout(timer);
+            if (settled || seq !== searchSeq) return;
+            settled = true;
+
             if (err) {
-                resultsContainer.html(`<div class="alert alert-danger" style="margin:5px;">${txt.error}</div>`);
+                // Clear the stored html too, otherwise restoreState() would later put the
+                // previous query's results back on screen under the current query.
+                showMessage(resultsContainer, `<div class="alert alert-danger" style="margin:5px;">${txt.error}</div>`);
                 return;
             }
-            if (!messages || messages.length === 0) {
-                const noRes = `<div class="text-center" style="padding:10px; color:#777;">${txt.noResults}</div>`;
-                resultsContainer.html(noRes);
-                window.chatSearchState.resultsHtml = noRes;
+
+            // Back-compat: older server versions returned a bare array of messages.
+            const data = Array.isArray(response) ? { messages: response } : (response || {});
+            const messages = data.messages || [];
+
+            if (!messages.length) {
+                showMessage(resultsContainer, `<div class="text-center" style="padding:10px; color:#777;">${txt.noResults}</div>`);
                 return;
             }
 
             let html = '<div class="d-flex flex-column">';
+            if (data.incomplete) {
+                html += `<div class="alert alert-warning text-xs" style="margin:5px;">${txt.incomplete}</div>`;
+            }
             messages.forEach(msg => {
                 // Coerce server-supplied ids/timestamps to safe primitives before they
                 // reach href/onclick/attribute sinks; guard against an invalid timestamp
@@ -277,10 +321,10 @@ $(document).ready(function () {
                 const roomId = parseInt(msg.roomId, 10);
                 const chatLink = (config.relative_path || '') + '/message/' + mid;
                 const senderName = escapeHtml((msg.user && msg.user.username) ? msg.user.username : txt.unknownUser);
-                
+
                 const mainAvatarHtml = renderMainAvatars(msg.participants);
                 const senderSmallAvatar = buildAvatarHtml(msg.user, 14, 'vertical-align: text-bottom;', 'align-middle');
-                
+
                 const cleanedContent = cleanContent(msg.content);
 
                 html += `
@@ -314,16 +358,17 @@ $(document).ready(function () {
                     <hr class="my-1">
                 `;
             });
+            if (data.truncated) {
+                html += `<div class="text-center text-muted text-xs" style="padding:6px;">${txt.truncated}</div>`;
+            }
             html += '</div>';
-            
-            resultsContainer.html(html);
-            
+
+            showMessage(resultsContainer, html);
+
             if ($.fn.timeago) {
                 resultsContainer.find('.timeago').timeago();
             }
 
-            window.chatSearchState.resultsHtml = html;
-            window.chatSearchState.lastScroll = 0;
             highlightActiveChat();
         });
     }

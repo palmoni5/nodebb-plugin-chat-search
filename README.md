@@ -12,7 +12,10 @@ Standard chat search in NodeBB works well when you already know which room the m
 Searches across all room IDs associated with your user account.
 
 **Performance Focused**  
-Matching is done against raw message content first, so the expensive render pipeline runs only for actual hits. Rooms are scanned in parallel with bounded concurrency, keeping the server responsive even during deep searches.
+Matching is done against raw message content first, so the expensive render pipeline runs only for actual hits. Rooms are scanned in parallel with bounded concurrency, and the number of matches kept per room is capped, so a very common word cannot make a single busy room dominate the whole request.
+
+**Stable, Chronological Results**  
+Every room the user can see is scanned on every search, and all matches are then ranked globally by timestamp before the result list is cut. The result set therefore does not shift around as rooms move up and down the recent-chats list.
 
 **Sticky UI**  
 Your search query and results remain visible when navigating between chat rooms.
@@ -43,9 +46,17 @@ Uses a `MutationObserver` to ensure the search bar is injected correctly regardl
 
 Implements `window.chatSearchState` so search results persist during Ajaxify navigation.
 
+**Error Handling**
+
+Rooms that fail to scan are reported to the client instead of being silently treated as empty, and the client applies its own timeout so a lost socket acknowledgement surfaces as an error rather than an endless spinner.
+
+**Limits**
+
+The search performs a linear scan rather than using an index. To keep that bounded it scans at most the newest 20,000 messages per room, keeps at most 200 matches per room, and returns at most 200 results overall; the UI says so when a result set was cut. Note that this scan reads every message object through NodeBB's shared object cache (40,000 entries), so on very large forums frequent searches will evict other cached data.
+
 **Compatibility**
 
-Built for NodeBB **^3.0.0**
+Built for NodeBB **^3.0.0 || ^4.0.0**
 
 ---
 
