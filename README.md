@@ -11,6 +11,12 @@ Standard chat search in NodeBB works well when you already know which room the m
 **Global Context**  
 Searches across all room IDs associated with your user account.
 
+**Indexed Search When Available**  
+The plugin first asks NodeBB's `filter:messaging.searchMessages` hook — the same hook that powers core's in-room message search — so an installed search plugin such as `nodebb-plugin-dbsearch` answers from its index instead of the plugin reading every message. Index hits are still re-checked against room membership, the private-room join cutoff and message deletion before they are shown, because a search index stores content, not visibility.
+
+**Substring Fallback**  
+Indexes match words; the built-in scan matches substrings. If no search plugin is installed, or the index returns nothing for the query, or the indexer errors, the plugin falls back to its own bounded scan — so recall is never worse than before, it is just slower in that case. The socket response reports which engine ran in its `engine` field (`index`, `scan` or `none`).
+
 **Performance Focused**  
 Matching is done against raw message content first, so the expensive render pipeline runs only for actual hits. Rooms are scanned in parallel with bounded concurrency, and the number of matches kept per room is capped, so a very common word cannot make a single busy room dominate the whole request.
 
@@ -52,7 +58,9 @@ Rooms that fail to scan are reported to the client instead of being silently tre
 
 **Limits**
 
-The search performs a linear scan rather than using an index. To keep that bounded it scans at most the newest 20,000 messages per room, keeps at most 200 matches per room, and returns at most 200 results overall; the UI says so when a result set was cut. Note that this scan reads every message object through NodeBB's shared object cache (40,000 entries), so on very large forums frequent searches will evict other cached data.
+With an index, `nodebb-plugin-dbsearch` returns at most 100 mids per query, ranked by its own relevance score rather than by time; the UI says so when a result set was cut.
+
+The fallback scan is linear. To keep it bounded it scans at most the newest 20,000 messages per room, keeps at most 200 matches per room, and returns at most 200 results overall. Note that this scan reads every message object through NodeBB's shared object cache (40,000 entries), so on very large forums frequent fallback scans will evict other cached data — installing a search plugin is the way to avoid that.
 
 **Compatibility**
 

@@ -4,6 +4,7 @@ const winston = require.main.require('winston');
 const messaging = require.main.require('./src/messaging');
 const user = require.main.require('./src/user');
 const db = require.main.require('./src/database');
+const plugins = require.main.require('./src/plugins');
 const translator = require.main.require('./src/translator');
 
 const plugin = {};
@@ -15,6 +16,13 @@ const MAX_SCANNED_MIDS_PER_ROOM = 20000; // newest N messages scanned per room
 const ROOM_CONCURRENCY = 10; // rooms scanned in parallel
 const RAW_READ_CHUNK = 500; // mids per raw-content DB read, bounds peak memory and event-loop blocking
 const MIN_QUERY_LENGTH = 2; // shorter queries match nearly everything and are not worth a full scan
+
+// NodeBB's own in-room message search is served by this hook; a search plugin such as
+// nodebb-plugin-dbsearch answers it from an index instead of reading every message.
+const SEARCH_HOOK = 'filter:messaging.searchMessages';
+// nodebb-plugin-dbsearch hardcodes a limit of 100 mids per call and honours no limit
+// from the payload. Used only to decide whether the result set was cut short.
+const INDEX_RESULT_LIMIT = 100;
 
 plugin.init = async (params) => {
     const socketPlugins = require.main.require('./src/socket.io/plugins');
@@ -175,6 +183,77 @@ async function mapWithConcurrency(items, worker) {
     return { results, errors };
 }
 
+// Asks a registered search plugin for candidate mids. Returns null when no plugin
+// answers this hook, so the caller knows to fall back to scanning.
+async function searchViaIndex({ roomIds, query }) {
+    if (!plugins.hooks || typeof plugins.hooks.hasListeners !== 'function' ||
+        !plugins.hooks.hasListeners(SEARCH_HOOK)) {
+        return null;
+    }
+    const result = await plugins.hooks.fire(SEARCH_HOOK, {
+        content: query,
+        roomId: roomIds.map(String),
+        // In this hook's contract `uid` filters by message *author*, not by caller.
+        // Leaving it empty searches the whole room rather than only our own messages.
+        uid: [],
+        matchWords: 'all',
+        ids: [],
+    });
+    const ids = result && Array.isArray(result.ids) ? result.ids : [];
+    return [...new Set(ids.map(String))];
+}
+
+// Per-room timestamp below which the user may not see messages. Public rooms and the
+// admin full-history path have no cutoff; private rooms cut at the join time.
+async function getRoomCutoffs({ roomIds, targetUid, allowFullHistory }) {
+    const cutoffs = new Map();
+    if (allowFullHistory) {
+        roomIds.forEach(roomId => cutoffs.set(String(roomId), 0));
+        return cutoffs;
+    }
+    const [rooms, joinScores] = await Promise.all([
+        messaging.getRoomsData(roomIds, ['public']),
+        db.sortedSetsScore(roomIds.map(roomId => `chat:room:${roomId}:uids`), targetUid),
+    ]);
+    roomIds.forEach((roomId, idx) => {
+        const isPublic = rooms[idx] && rooms[idx].public;
+        cutoffs.set(String(roomId), isPublic ? 0 : (joinScores[idx] || 0));
+    });
+    return cutoffs;
+}
+
+// A search plugin indexes content, not visibility, so its hits still have to pass the
+// same checks the scan path applies: room must be one we are allowed to search, the
+// message must not be someone else's deleted message, and it must post-date the join.
+async function filterIndexedMids({ mids, roomIds, targetUid, allowFullHistory }) {
+    const allowedRooms = new Set(roomIds.map(String));
+    const [fields, cutoffs] = await Promise.all([
+        db.getObjectsFields(mids.map(mid => `message:${mid}`), ['roomId', 'timestamp', 'deleted', 'fromuid']),
+        getRoomCutoffs({ roomIds, targetUid, allowFullHistory }),
+    ]);
+
+    const matches = [];
+    fields.forEach((msg, idx) => {
+        if (!msg || !msg.roomId) {
+            return;
+        }
+        const roomId = String(msg.roomId);
+        if (!allowedRooms.has(roomId)) {
+            return;
+        }
+        const isOwner = parseInt(msg.fromuid, 10) === parseInt(targetUid, 10);
+        if (parseInt(msg.deleted, 10) === 1 && !isOwner) {
+            return;
+        }
+        const timestamp = parseInt(msg.timestamp, 10) || 0;
+        if (timestamp < cutoffs.get(roomId)) {
+            return;
+        }
+        matches.push({ mid: mids[idx], roomId, timestamp });
+    });
+    return matches;
+}
+
 // Newest first. mids can be non-numeric (federated messages carry URIs), so the
 // tiebreaker falls back to a string comparison rather than producing NaN.
 function compareByRecency(a, b) {
@@ -203,7 +282,7 @@ async function searchGlobal(socket, data) {
     // message in every room only to match nearly all of them.
     const query = String(data.query || '').trim().toLowerCase();
     if (query.length < MIN_QUERY_LENGTH) {
-        return { messages: [], truncated: false, incomplete: false };
+        return { messages: [], truncated: false, incomplete: false, engine: 'none' };
     }
 
     const requestedRoomIds = Array.isArray(data.roomIds) ? data.roomIds : null;
@@ -218,27 +297,55 @@ async function searchGlobal(socket, data) {
         roomIds = roomIds.filter((roomId, idx) => inRoom[idx]);
     }
     if (!roomIds.length) {
-        return { messages: [], truncated: false, incomplete: false };
+        return { messages: [], truncated: false, incomplete: false, engine: 'none' };
     }
 
-    // Phase 1 - scan every room on raw content. Every room is always scanned, so the
-    // result set does not depend on the (constantly changing) recency order of rooms.
-    const scan = await mapWithConcurrency(roomIds, roomId =>
-        scanRoom({ callerUid: socket.uid, targetUid, roomId, query, allowFullHistory }));
+    // Phase 1 - collect candidate matches. An indexed search plugin answers in
+    // milliseconds; scanning is the fallback when no plugin is installed, when the
+    // index has nothing for this query (it matches words, we match substrings), or
+    // when the indexer itself fails.
+    let engine = 'index';
+    let allMatches = null;
+    let truncated = false;
+    let incomplete = false;
 
-    if (scan.errors.length && !scan.results.length) {
-        throw scan.errors[0];
+    try {
+        const indexedMids = await searchViaIndex({ roomIds, query });
+        if (indexedMids && indexedMids.length) {
+            const visible = await filterIndexedMids({
+                mids: indexedMids, roomIds, targetUid, allowFullHistory,
+            });
+            if (visible.length) {
+                allMatches = visible;
+                truncated = indexedMids.length >= INDEX_RESULT_LIMIT;
+            }
+        }
+    } catch (err) {
+        winston.warn(`[chat-search] ${SEARCH_HOOK} failed, falling back to scanning: ${err.message}`);
+    }
+
+    if (!allMatches) {
+        engine = 'scan';
+        // Every room is always scanned, so the result set does not depend on the
+        // (constantly changing) recency order of rooms.
+        const scan = await mapWithConcurrency(roomIds, roomId =>
+            scanRoom({ callerUid: socket.uid, targetUid, roomId, query, allowFullHistory }));
+
+        if (scan.errors.length && !scan.results.length) {
+            throw scan.errors[0];
+        }
+        incomplete = scan.errors.length > 0;
+
+        allMatches = [];
+        scan.results.forEach((room) => {
+            if (room.truncated) {
+                truncated = true;
+            }
+            allMatches.push(...room.matches);
+        });
     }
 
     // Phase 2 - rank all matches globally, newest first, then keep only the top slice.
-    const allMatches = [];
-    let truncated = false;
-    scan.results.forEach((room) => {
-        if (room.truncated) {
-            truncated = true;
-        }
-        allMatches.push(...room.matches);
-    });
     allMatches.sort(compareByRecency);
     if (allMatches.length > MAX_RESULTS) {
         truncated = true;
@@ -267,7 +374,8 @@ async function searchGlobal(socket, data) {
     return {
         messages,
         truncated,
-        incomplete: scan.errors.length > 0 || render.errors.length > 0,
+        incomplete: incomplete || render.errors.length > 0,
+        engine,
     };
 }
 

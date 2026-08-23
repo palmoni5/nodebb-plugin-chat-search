@@ -18,7 +18,7 @@ $(document).ready(function () {
         unknownUser: isHebrew ? 'לא ידוע' : 'Unknown',
         timeout: isHebrew ? 'החיפוש נמשך זמן רב מדי. נסה מונח ארוך או מדויק יותר.' : 'The search took too long. Try a longer or more specific term.',
         tooShort: isHebrew ? 'הקלד לפחות 2 תווים.' : 'Type at least 2 characters.',
-        truncated: isHebrew ? 'מוצגות התוצאות העדכניות ביותר בלבד. צמצם את החיפוש כדי לראות את כולן.' : 'Showing the most recent matches only. Narrow the search to see them all.',
+        truncated: isHebrew ? 'לא כל ההתאמות מוצגות. צמצם את החיפוש כדי לראות את כולן.' : 'Not all matches are shown. Narrow the search to see them all.',
         incomplete: isHebrew ? 'חלק מהחדרים לא נסרקו בגלל שגיאה. התוצאות חלקיות.' : 'Some rooms could not be searched. These results are partial.'
     };
 
